@@ -64,11 +64,6 @@ const (
 	protocolIPv6ICMP = 58
 )
 
-var (
-	ipv4Proto = map[string]string{"ip": "ip4:icmp", "udp": "udp4"}
-	ipv6Proto = map[string]string{"ip": "ip6:ipv6-icmp", "udp": "udp6"}
-)
-
 // NewPinger returns a new Pinger struct pointer
 func NewPinger(addr string) (*Pinger, error) {
 	ipaddr, err := net.ResolveIPAddr("ip", addr)
@@ -91,7 +86,6 @@ func NewPinger(addr string) (*Pinger, error) {
 		Timeout:  time.Second * 100000,
 		Count:    -1,
 		id:       r.Intn(math.MaxInt16),
-		network:  "udp",
 		ipv4:     ipv4,
 		Size:     timeSliceLength,
 		Tracker:  r.Int63n(math.MaxInt64),
@@ -148,7 +142,6 @@ type Pinger struct {
 	size     int
 	id       int
 	sequence int
-	network  string
 }
 
 type packet struct {
@@ -246,23 +239,6 @@ func (p *Pinger) Addr() string {
 	return p.addr
 }
 
-// SetPrivileged sets the type of ping pinger will send.
-// false means pinger will send an "unprivileged" UDP ping.
-// true means pinger will send a "privileged" raw ICMP ping.
-// NOTE: setting to true requires that it be run with super-user privileges.
-func (p *Pinger) SetPrivileged(privileged bool) {
-	if privileged {
-		p.network = "ip"
-	} else {
-		p.network = "udp"
-	}
-}
-
-// Privileged returns whether pinger is running in privileged mode.
-func (p *Pinger) Privileged() bool {
-	return p.network == "ip"
-}
-
 // Run runs the pinger. This is a blocking function that will exit when it's
 // done. If Count or Interval are not specified, it will run continuously until
 // it is interrupted.
@@ -273,11 +249,11 @@ func (p *Pinger) Run() {
 func (p *Pinger) run() {
 	var conn *icmp.PacketConn
 	if p.ipv4 {
-		if conn = p.listen(ipv4Proto[p.network], p.source); conn == nil {
+		if conn = p.listen("ip4:icmp", p.source); conn == nil {
 			return
 		}
 	} else {
-		if conn = p.listen(ipv6Proto[p.network], p.source); conn == nil {
+		if conn = p.listen("ip6:icmp", p.source); conn == nil {
 			return
 		}
 	}
@@ -419,11 +395,7 @@ func (p *Pinger) processPacket(recv *packet) error {
 	var bytes []byte
 	var proto int
 	if p.ipv4 {
-		if p.network == "ip" {
-			bytes = ipv4Payload(recv.bytes)
-		} else {
-			bytes = recv.bytes
-		}
+		bytes = ipv4Payload(recv.bytes)
 		proto = protocolICMP
 	} else {
 		bytes = recv.bytes
@@ -442,23 +414,9 @@ func (p *Pinger) processPacket(recv *packet) error {
 	}
 
 	body := m.Body.(*icmp.Echo)
-	// If we are priviledged, we can match icmp.ID
-	if p.network == "ip" {
-		// Check if reply from same ID
-		if body.ID != p.id {
-			return nil
-		}
-	} else {
-		// If we are not priviledged, we cannot set ID - require kernel ping_table map
-		// need to use contents to identify packet
-		data := IcmpData{}
-		err := json.Unmarshal(body.Data, &data)
-		if err != nil {
-			return err
-		}
-		if data.Tracker != p.Tracker {
-			return nil
-		}
+	// Check if reply from same ID
+	if body.ID != p.id {
+		return nil
 	}
 
 	outPkt := &Packet{
@@ -506,9 +464,6 @@ func (p *Pinger) sendICMP(conn *icmp.PacketConn) error {
 	}
 
 	var dst net.Addr = p.ipaddr
-	if p.network == "udp" {
-		dst = &net.UDPAddr{IP: p.ipaddr.IP, Zone: p.ipaddr.Zone}
-	}
 
 	t := timeToBytes(time.Now())
 	if p.Size-timeSliceLength != 0 {
