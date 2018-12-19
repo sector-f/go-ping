@@ -106,7 +106,7 @@ type Pinger struct {
 	Timeout time.Duration
 
 	// MaxTTL specifies that maximum TTL that will be allowed. Default is 30.
-	MaxTTL uint
+	MaxTTL int
 
 	// Count tells pinger to stop after sending (and receiving) Count echo
 	// packets. If this option is not specified, pinger will operate until
@@ -254,62 +254,64 @@ func (p *Pinger) Run() {
 }
 
 func (p *Pinger) run() {
-	var conn *icmp.PacketConn
-	if p.ipv4 {
-		if conn = p.listen("ip4:icmp", p.source); conn == nil {
-			return
-		}
-	} else {
-		if conn = p.listen("ip6:icmp", p.source); conn == nil {
-			return
-		}
-	}
-	defer conn.Close()
-	defer p.finish()
-
-	var wg sync.WaitGroup
-	recv := make(chan *packet, 5)
-	defer close(recv)
-	wg.Add(1)
-	go p.recvICMP(conn, recv, &wg)
-
-	err := p.sendICMP(conn)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
-
-	timeout := time.NewTicker(p.Timeout)
-	defer timeout.Stop()
-	interval := time.NewTicker(p.Interval)
-	defer interval.Stop()
-
-	for {
-		select {
-		case <-p.done:
-			wg.Wait()
-			return
-		case <-timeout.C:
-			close(p.done)
-			wg.Wait()
-			return
-		case <-interval.C:
-			if p.Count > 0 && p.PacketsSent >= p.Count {
-				continue
+	for ttl := 1; ttl < p.MaxTTL; ttl++ {
+		var conn *icmp.PacketConn
+		if p.ipv4 {
+			if conn = p.listen("ip4:icmp", p.source); conn == nil {
+				return
 			}
-			err = p.sendICMP(conn)
-			if err != nil {
-				fmt.Println("FATAL: ", err.Error())
-			}
-		case r := <-recv:
-			err := p.processPacket(r)
-			if err != nil {
-				fmt.Println("FATAL: ", err.Error())
+		} else {
+			if conn = p.listen("ip6:icmp", p.source); conn == nil {
+				return
 			}
 		}
-		if p.Count > 0 && p.PacketsRecv >= p.Count {
-			close(p.done)
-			wg.Wait()
-			return
+		defer conn.Close()
+		defer p.finish()
+
+		var wg sync.WaitGroup
+		recv := make(chan *packet, 5)
+		defer close(recv)
+		wg.Add(1)
+		go p.recvICMP(conn, recv, &wg)
+
+		err := p.sendICMP(conn, ttl)
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+
+		timeout := time.NewTicker(p.Timeout)
+		defer timeout.Stop()
+		interval := time.NewTicker(p.Interval)
+		defer interval.Stop()
+
+		for {
+			select {
+			case <-p.done:
+				wg.Wait()
+				return
+			case <-timeout.C:
+				close(p.done)
+				wg.Wait()
+				return
+			case <-interval.C:
+				if p.Count > 0 && p.PacketsSent >= p.Count {
+					continue
+				}
+				err = p.sendICMP(conn, ttl)
+				if err != nil {
+					fmt.Println("FATAL: ", err.Error())
+				}
+			case r := <-recv:
+				err := p.processPacket(r)
+				if err != nil {
+					fmt.Println("FATAL: ", err.Error())
+				}
+			}
+			if p.Count > 0 && p.PacketsRecv >= p.Count {
+				close(p.done)
+				wg.Wait()
+				return
+			}
 		}
 	}
 }
@@ -473,12 +475,16 @@ type IcmpData struct {
 	Tracker int64
 }
 
-func (p *Pinger) sendICMP(conn *icmp.PacketConn) error {
+func (p *Pinger) sendICMP(conn *icmp.PacketConn, ttl int) error {
 	var typ icmp.Type
 	if p.ipv4 {
 		typ = ipv4.ICMPTypeEcho
+		ipv4Conn := conn.IPv4PacketConn()
+		ipv4Conn.SetTTL(ttl)
 	} else {
 		typ = ipv6.ICMPTypeEchoRequest
+		ipv6Conn := conn.IPv4PacketConn()
+		ipv6Conn.SetTTL(ttl)
 	}
 
 	var dst net.Addr = p.ipaddr
