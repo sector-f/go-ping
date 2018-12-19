@@ -44,6 +44,7 @@
 package ping
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -90,6 +91,7 @@ func NewPinger(addr string) (*Pinger, error) {
 		Size:     timeSliceLength,
 		Tracker:  r.Int63n(math.MaxInt64),
 		done:     make(chan bool),
+		data:     [][]byte{},
 	}, nil
 }
 
@@ -142,6 +144,7 @@ type Pinger struct {
 	size     int
 	id       int
 	sequence int
+	data     [][]byte
 }
 
 type packet struct {
@@ -392,31 +395,42 @@ func (p *Pinger) recvICMP(
 }
 
 func (p *Pinger) processPacket(recv *packet) error {
-	var bytes []byte
+	var packetBytes []byte
 	var proto int
 	if p.ipv4 {
-		bytes = ipv4Payload(recv.bytes)
+		packetBytes = ipv4Payload(recv.bytes)
 		proto = protocolICMP
 	} else {
-		bytes = recv.bytes
+		packetBytes = recv.bytes
 		proto = protocolIPv6ICMP
 	}
 
 	var m *icmp.Message
 	var err error
-	if m, err = icmp.ParseMessage(proto, bytes[:recv.nbytes]); err != nil {
+	if m, err = icmp.ParseMessage(proto, packetBytes[:recv.nbytes]); err != nil {
 		return fmt.Errorf("Error parsing icmp message")
 	}
 
-	if m.Type != ipv4.ICMPTypeEchoReply && m.Type != ipv6.ICMPTypeEchoReply {
+	switch m.Type {
+	case ipv4.ICMPTypeEchoReply, ipv6.ICMPTypeEchoReply:
+		// Do nothing
+	case ipv4.ICMPTypeTimeExceeded, ipv6.ICMPTypeTimeExceeded:
+		fmt.Println("TTL exceeded message received")
+	default:
 		// Not an echo reply, ignore it
 		return nil
 	}
 
-	body := m.Body.(*icmp.Echo)
-	// Check if reply from same ID
-	if body.ID != p.id {
-		return nil
+	switch body := m.Body.(type) {
+	case *icmp.Echo:
+		// Check if reply from same ID
+		if body.ID != p.id {
+			return nil
+		}
+	case *icmp.TimeExceeded:
+		if !sliceContains(p.data, body.Data) {
+			return nil
+		}
 	}
 
 	outPkt := &Packet{
@@ -474,6 +488,7 @@ func (p *Pinger) sendICMP(conn *icmp.PacketConn) error {
 	if err != nil {
 		return fmt.Errorf("Unable to marshal data %s", err)
 	}
+	p.data = append(p.data, data)
 	body := &icmp.Echo{
 		ID:   p.id,
 		Seq:  p.sequence,
@@ -554,4 +569,13 @@ func timeToBytes(t time.Time) []byte {
 		b[i] = byte((nsec >> ((7 - i) * 8)) & 0xff)
 	}
 	return b
+}
+
+func sliceContains(haystack [][]byte, needle []byte) bool {
+	for _, s := range haystack {
+		if bytes.Equal(s, needle) {
+			return true
+		}
+	}
+	return false
 }
