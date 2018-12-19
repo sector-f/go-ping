@@ -84,6 +84,7 @@ func NewPinger(addr string) (*Pinger, error) {
 		ipaddr:   ipaddr,
 		addr:     addr,
 		Interval: time.Second,
+		MaxTTL:   30,
 		Timeout:  time.Second * 100000,
 		Count:    -1,
 		id:       r.Intn(math.MaxInt16),
@@ -103,6 +104,9 @@ type Pinger struct {
 	// Timeout specifies a timeout before ping exits, regardless of how many
 	// packets have been received.
 	Timeout time.Duration
+
+	// MaxTTL specifies that maximum TTL that will be allowed. Default is 30.
+	MaxTTL uint
 
 	// Count tells pinger to stop after sending (and receiving) Count echo
 	// packets. If this option is not specified, pinger will operate until
@@ -421,9 +425,9 @@ func (p *Pinger) processPacket(recv *packet) error {
 		return nil
 	}
 
+	// Check if reply from same ID
 	switch body := m.Body.(type) {
 	case *icmp.Echo:
-		// Check if reply from same ID
 		if body.ID != p.id {
 			return nil
 		}
