@@ -86,7 +86,7 @@ func NewPinger(addr string) (*Pinger, error) {
 		Interval: time.Second,
 		MaxTTL:   30,
 		Timeout:  time.Second * 100000,
-		Count:    -1,
+		Count:    1,
 		id:       r.Intn(math.MaxInt16),
 		ipv4:     ipv4,
 		Size:     timeSliceLength,
@@ -404,7 +404,8 @@ func (p *Pinger) processPacket(recv *packet) error {
 	var packetBytes []byte
 	var proto int
 	if p.ipv4 {
-		packetBytes = ipv4Payload(recv.bytes)
+		// packetBytes = ipv4Payload(recv.bytes)
+		packetBytes = recv.bytes
 		proto = protocolICMP
 	} else {
 		packetBytes = recv.bytes
@@ -421,20 +422,19 @@ func (p *Pinger) processPacket(recv *packet) error {
 	case ipv4.ICMPTypeEchoReply, ipv6.ICMPTypeEchoReply:
 		// Do nothing
 	case ipv4.ICMPTypeTimeExceeded, ipv6.ICMPTypeTimeExceeded:
-		fmt.Println("TTL exceeded message received")
 	default:
 		// Not an echo reply, ignore it
 		return nil
 	}
 
-	// Check if reply from same ID
 	switch body := m.Body.(type) {
 	case *icmp.Echo:
 		if body.ID != p.id {
 			return nil
 		}
 	case *icmp.TimeExceeded:
-		if !sliceContains(p.data, body.Data) {
+		doesMatch, _ := sliceContains(p.data, body.Data[len(body.Data)-8:])
+		if !doesMatch {
 			return nil
 		}
 	}
@@ -454,6 +454,8 @@ func (p *Pinger) processPacket(recv *packet) error {
 		}
 		outPkt.Rtt = time.Since(bytesToTime(data.Bytes))
 		outPkt.Seq = pkt.Seq
+		p.PacketsRecv += 1
+	case *icmp.TimeExceeded:
 		p.PacketsRecv += 1
 	default:
 		// Very bad, not sure how this can happen
@@ -498,7 +500,6 @@ func (p *Pinger) sendICMP(conn *icmp.PacketConn, ttl int) error {
 	if err != nil {
 		return fmt.Errorf("Unable to marshal data %s", err)
 	}
-	p.data = append(p.data, data)
 	body := &icmp.Echo{
 		ID:   p.id,
 		Seq:  p.sequence,
@@ -513,6 +514,7 @@ func (p *Pinger) sendICMP(conn *icmp.PacketConn, ttl int) error {
 	if err != nil {
 		return err
 	}
+	p.data = append(p.data, bytes[:8])
 
 	for {
 		if _, err := conn.WriteTo(bytes, dst); err != nil {
@@ -581,11 +583,11 @@ func timeToBytes(t time.Time) []byte {
 	return b
 }
 
-func sliceContains(haystack [][]byte, needle []byte) bool {
-	for _, s := range haystack {
+func sliceContains(haystack [][]byte, needle []byte) (bool, int) {
+	for i, s := range haystack {
 		if bytes.Equal(s, needle) {
-			return true
+			return true, i
 		}
 	}
-	return false
+	return false, -1
 }
