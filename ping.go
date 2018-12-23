@@ -91,7 +91,7 @@ func NewPinger(addr string) (*Pinger, error) {
 		Size:     timeSliceLength,
 		Tracker:  r.Int63n(math.MaxInt64),
 		done:     make(chan bool),
-		data:     [][]byte{},
+		packets:  []sentPacket{},
 	}, nil
 }
 
@@ -142,7 +142,21 @@ type Pinger struct {
 	size     int
 	id       int
 	sequence int
-	data     [][]byte
+	packets  []sentPacket
+}
+
+type sentPacket struct {
+	data []byte
+	time time.Time
+}
+
+func (p *Pinger) checkData(data []byte) (bool, time.Time) {
+	for _, packet := range p.packets {
+		if bytes.Equal(data, packet.data) {
+			return true, packet.time
+		}
+	}
+	return false, time.Now()
 }
 
 type packet struct {
@@ -392,6 +406,8 @@ func (p *Pinger) recvICMP(
 }
 
 func (p *Pinger) processPacket(recv *packet) (bool, error) {
+	now := time.Now()
+
 	finished := false
 	if recv.addr.(*net.IPAddr).IP.Equal(p.ipaddr.IP) {
 		finished = true
@@ -422,14 +438,19 @@ func (p *Pinger) processPacket(recv *packet) (bool, error) {
 		return finished, nil
 	}
 
+	var sentTime time.Time
+	var doesMatch bool
+
 	switch body := m.Body.(type) {
 	case *icmp.Echo:
 		if body.ID != p.id {
 			return finished, nil
 		}
+		lastPacket := p.packets[len(p.packets)-1]
+		sentTime = lastPacket.time
 	case *icmp.TimeExceeded:
 		payload := ipv4Payload(body.Data)
-		doesMatch, _ := sliceContains(p.data, payload[:8])
+		doesMatch, sentTime = p.checkData(payload[:8])
 		if !doesMatch {
 			return finished, nil
 		}
@@ -448,10 +469,12 @@ func (p *Pinger) processPacket(recv *packet) (bool, error) {
 		if err != nil {
 			return finished, err
 		}
-		outPkt.Rtt = time.Since(bytesToTime(data.Bytes))
+		// outPkt.Rtt = time.Since(bytesToTime(data.Bytes))
+		outPkt.Rtt = now.Sub(sentTime)
 		outPkt.Seq = pkt.Seq
 		p.PacketsRecv += 1
 	case *icmp.TimeExceeded:
+		outPkt.Rtt = now.Sub(sentTime)
 		p.PacketsRecv += 1
 	default:
 		// Very bad, not sure how this can happen
@@ -510,7 +533,7 @@ func (p *Pinger) sendICMP(conn *icmp.PacketConn, ttl int) error {
 	if err != nil {
 		return err
 	}
-	p.data = append(p.data, bytes[:8])
+	p.packets = append(p.packets, sentPacket{bytes[:8], time.Now()})
 
 	for {
 		if _, err := conn.WriteTo(bytes, dst); err != nil {
@@ -577,13 +600,4 @@ func timeToBytes(t time.Time) []byte {
 		b[i] = byte((nsec >> ((7 - i) * 8)) & 0xff)
 	}
 	return b
-}
-
-func sliceContains(haystack [][]byte, needle []byte) (bool, int) {
-	for i, s := range haystack {
-		if bytes.Equal(s, needle) {
-			return true, i
-		}
-	}
-	return false, -1
 }
