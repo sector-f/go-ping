@@ -160,7 +160,7 @@ type Packet struct {
 	IPAddr *net.IPAddr
 
 	// Addr is the string address of the host being pinged.
-	Addr string
+	// Addr string
 
 	// NBytes is the number of bytes in the message.
 	Nbytes int
@@ -437,8 +437,8 @@ func (p *Pinger) processPacket(recv *packet) (bool, error) {
 
 	outPkt := &Packet{
 		Nbytes: recv.nbytes,
-		IPAddr: p.ipaddr,
-		Addr:   p.addr,
+		IPAddr: recv.addr.(*net.IPAddr),
+		// Addr:   p.addr,
 	}
 
 	switch pkt := m.Body.(type) {
