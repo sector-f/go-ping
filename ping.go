@@ -269,17 +269,17 @@ func (p *Pinger) run() {
 	wg.Add(1)
 	go p.recvICMP(conn, recv, &wg)
 
-	// err := p.sendICMP(conn, ttl)
-	// if err != nil {
-	// 	fmt.Println(err.Error())
-	// }
+	err := p.sendICMP(conn, ttl)
+	if err != nil {
+		fmt.Println(err.Error())
+	}
+	ttl += 1
 
 	timeout := time.NewTicker(p.Timeout)
 	defer timeout.Stop()
 	interval := time.NewTicker(p.Interval)
 	defer interval.Stop()
 
-	var err error
 	for ttl <= p.MaxTTL {
 		select {
 		case <-p.done:
