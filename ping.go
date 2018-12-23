@@ -86,7 +86,6 @@ func NewPinger(addr string) (*Pinger, error) {
 		Interval: time.Second,
 		MaxTTL:   30,
 		Timeout:  time.Second * 100000,
-		Count:    1,
 		id:       r.Intn(math.MaxInt16),
 		ipv4:     ipv4,
 		Size:     timeSliceLength,
@@ -107,11 +106,6 @@ type Pinger struct {
 
 	// MaxTTL specifies that maximum TTL that will be allowed. Default is 30.
 	MaxTTL int
-
-	// Count tells pinger to stop after sending (and receiving) Count echo
-	// packets. If this option is not specified, pinger will operate until
-	// interrupted.
-	Count int
 
 	// Debug runs in debug mode
 	Debug bool
@@ -152,6 +146,7 @@ type Pinger struct {
 }
 
 type packet struct {
+	addr   net.Addr
 	bytes  []byte
 	nbytes int
 }
@@ -247,8 +242,7 @@ func (p *Pinger) Addr() string {
 }
 
 // Run runs the pinger. This is a blocking function that will exit when it's
-// done. If Count or Interval are not specified, it will run continuously until
-// it is interrupted.
+// done.
 func (p *Pinger) Run() {
 	p.run()
 }
@@ -275,16 +269,17 @@ func (p *Pinger) run() {
 	wg.Add(1)
 	go p.recvICMP(conn, recv, &wg)
 
-	err := p.sendICMP(conn, ttl)
-	if err != nil {
-		fmt.Println(err.Error())
-	}
+	// err := p.sendICMP(conn, ttl)
+	// if err != nil {
+	// 	fmt.Println(err.Error())
+	// }
 
 	timeout := time.NewTicker(p.Timeout)
 	defer timeout.Stop()
 	interval := time.NewTicker(p.Interval)
 	defer interval.Stop()
 
+	var err error
 	for ttl <= p.MaxTTL {
 		select {
 		case <-p.done:
@@ -295,24 +290,19 @@ func (p *Pinger) run() {
 			wg.Wait()
 			return
 		case <-interval.C:
-			if p.Count > 0 && p.PacketsSent >= p.Count {
-				continue
-			}
 			err = p.sendICMP(conn, ttl)
 			if err != nil {
 				fmt.Println("FATAL: ", err.Error())
 			}
 			ttl += 1
 		case r := <-recv:
-			err := p.processPacket(r)
+			finished, err := p.processPacket(r)
 			if err != nil {
 				fmt.Println("FATAL: ", err.Error())
 			}
-		}
-		if p.Count > 0 && p.PacketsRecv >= p.Count {
-			close(p.done)
-			wg.Wait()
-			return
+			if finished {
+				return
+			}
 		}
 	}
 }
@@ -383,7 +373,7 @@ func (p *Pinger) recvICMP(
 		default:
 			bytes := make([]byte, 512)
 			conn.SetReadDeadline(time.Now().Add(time.Millisecond * 100))
-			n, _, err := conn.ReadFrom(bytes)
+			n, addr, err := conn.ReadFrom(bytes)
 			if err != nil {
 				if neterr, ok := err.(*net.OpError); ok {
 					if neterr.Timeout() {
@@ -396,12 +386,17 @@ func (p *Pinger) recvICMP(
 				}
 			}
 
-			recv <- &packet{bytes: bytes, nbytes: n}
+			recv <- &packet{addr: addr, bytes: bytes, nbytes: n}
 		}
 	}
 }
 
-func (p *Pinger) processPacket(recv *packet) error {
+func (p *Pinger) processPacket(recv *packet) (bool, error) {
+	finished := false
+	if recv.addr.(*net.IPAddr).IP.Equal(p.ipaddr.IP) {
+		finished = true
+	}
+
 	var packetBytes []byte
 	var proto int
 	if p.ipv4 {
@@ -416,27 +411,27 @@ func (p *Pinger) processPacket(recv *packet) error {
 	var m *icmp.Message
 	var err error
 	if m, err = icmp.ParseMessage(proto, packetBytes[:recv.nbytes]); err != nil {
-		return fmt.Errorf("Error parsing icmp message")
+		return finished, fmt.Errorf("Error parsing icmp message")
 	}
 
 	switch m.Type {
 	case ipv4.ICMPTypeEchoReply, ipv6.ICMPTypeEchoReply:
-		// Do nothing
 	case ipv4.ICMPTypeTimeExceeded, ipv6.ICMPTypeTimeExceeded:
 	default:
 		// Not an echo reply, ignore it
-		return nil
+		return finished, nil
 	}
 
 	switch body := m.Body.(type) {
 	case *icmp.Echo:
 		if body.ID != p.id {
-			return nil
+			return finished, nil
 		}
 	case *icmp.TimeExceeded:
-		doesMatch, _ := sliceContains(p.data, body.Data[len(body.Data)-8:])
+		payload := ipv4Payload(body.Data)
+		doesMatch, _ := sliceContains(p.data, payload[:8])
 		if !doesMatch {
-			return nil
+			return finished, nil
 		}
 	}
 
@@ -451,7 +446,7 @@ func (p *Pinger) processPacket(recv *packet) error {
 		data := IcmpData{}
 		err := json.Unmarshal(m.Body.(*icmp.Echo).Data, &data)
 		if err != nil {
-			return err
+			return finished, err
 		}
 		outPkt.Rtt = time.Since(bytesToTime(data.Bytes))
 		outPkt.Seq = pkt.Seq
@@ -460,7 +455,7 @@ func (p *Pinger) processPacket(recv *packet) error {
 		p.PacketsRecv += 1
 	default:
 		// Very bad, not sure how this can happen
-		return fmt.Errorf("Error, invalid ICMP echo reply. Body type: %T, %s",
+		return finished, fmt.Errorf("Error, invalid ICMP echo reply. Body type: %T, %s",
 			pkt, pkt)
 	}
 
@@ -470,7 +465,7 @@ func (p *Pinger) processPacket(recv *packet) error {
 		handler(outPkt)
 	}
 
-	return nil
+	return finished, nil
 }
 
 type IcmpData struct {
