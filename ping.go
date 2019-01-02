@@ -65,6 +65,46 @@ const (
 	protocolIPv6ICMP = 58
 )
 
+type RouteTracer struct {
+	Interval time.Duration
+	Timeout  time.Duration
+	MaxTTL   uint
+	// OnRecv   func(*Packet)
+	// OnFinish func(*Statistics)
+
+	ipv4    bool
+	dest    string
+	destIP  *net.IPAddr
+	done    chan bool
+	packets []sentPacket
+}
+
+func NewTracer(dest string) (*RouteTracer, error) {
+	ipaddr, err := net.ResolveIPAddr("ip", dest)
+	if err != nil {
+		return nil, err
+	}
+
+	var ipv4 bool
+	if isIPv4(ipaddr.IP) {
+		ipv4 = true
+	} else if isIPv6(ipaddr.IP) {
+		ipv4 = false
+	}
+
+	return &RouteTracer{
+		Interval: time.Second,
+		MaxTTL:   30,
+		Timeout:  time.Second * 100000,
+
+		ipv4:    ipv4,
+		dest:    dest,
+		destIP:  ipaddr,
+		done:    make(chan bool),
+		packets: []sentPacket{},
+	}, nil
+}
+
 // NewPinger returns a new Pinger struct pointer
 func NewPinger(addr string) (*Pinger, error) {
 	ipaddr, err := net.ResolveIPAddr("ip", addr)
